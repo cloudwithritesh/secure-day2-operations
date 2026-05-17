@@ -1,0 +1,20 @@
+subscription_id         = ""
+resource_group_name     = "rg-existing-platform"
+resource_group_location = "southeastasia"
+storage_account_name    = "existingstorageacct01"
+
+storage_account_tier             = "Standard"
+storage_account_replication_type = "LRS"
+storage_account_kind             = "StorageV2"
+storage_account_access_tier      = "Hot"
+
+vault_addr    = "http://127.0.0.1:8200"
+vault_token   = "root"
+vault_kv_mount  = "app"
+vault_secret_name = "platform/azure/storage-account"
+create_kv_mount = false
+
+tags = {
+  owner       = "platform-team"
+  environment = "shared"
+}

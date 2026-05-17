@@ -39,6 +39,7 @@ The lab supports:
 │   └── azure-bootstrap-vault.sh     # Bootstrap vault module from Azure outputs
 └── terraform/
     ├── azure/                       # Azure infrastructure + Vault container
+    ├── azure-existing/              # Import existing Azure resources + secure in Vault
     └── vault/                       # Vault configuration (auth, policy, secrets)
 ```
 
@@ -74,6 +75,7 @@ cd secure-day2-operations
 
 - **Path A (Local first)**: fastest for live demo and troubleshooting
 - **Path B (Azure cloud)**: same concepts, cloud deployment
+- **Path C (Existing Azure resources)**: import existing resources into Terraform state and secure them in Vault
 
 You can do both in one session.
 
@@ -166,7 +168,71 @@ terraform -chdir=terraform/vault apply \
 
 ---
 
-## 7. Day 2 operations (live demo script)
+## 7. Path C - Adopt existing Azure resources and secure them with Vault
+
+This path is for brownfield environments where resources already exist.
+
+What this stack does (`terraform/azure-existing`):
+
+1. Imports an existing resource group and storage account into Terraform state.
+2. Keeps them in **adoption mode** (`prevent_destroy`, `ignore_changes = all`) to avoid accidental changes.
+3. Writes sensitive storage account access details to Vault KV v2.
+
+### Step C1: Ensure Vault is ready
+
+Use either local Vault (Path A) or Azure Vault (Path B), then export:
+
+```bash
+export VAULT_ADDR="<your-vault-address>"
+export VAULT_TOKEN="<your-vault-admin-token>"
+```
+
+### Step C2: Prepare import variables
+
+```bash
+cp terraform/azure-existing/terraform.tfvars.example terraform/azure-existing/terraform.tfvars
+```
+
+Edit `terraform/azure-existing/terraform.tfvars`:
+
+- `resource_group_name`
+- `resource_group_location`
+- `storage_account_name`
+- storage account SKU/kind values (must match existing resource)
+- `vault_addr`, `vault_token`
+
+If your KV mount already exists at `app`, keep `create_kv_mount = false`.
+Set it to `true` only when you need Terraform to create the mount.
+
+### Step C3: Import + apply in one run (declarative import blocks)
+
+```bash
+terraform -chdir=terraform/azure-existing init
+terraform -chdir=terraform/azure-existing apply
+```
+
+### Step C4: Verify imported state and Vault secret
+
+```bash
+terraform -chdir=terraform/azure-existing state list
+terraform -chdir=terraform/azure-existing output
+vault kv get app/platform/azure/storage-account
+```
+
+The secret contains:
+
+- storage account name
+- primary access key
+- primary connection string
+- blob endpoint
+
+### Step C5: Day 2 use case with imported resources
+
+Use Vault as the operational source of truth for access credentials instead of sharing keys directly in scripts/pipelines.
+
+---
+
+## 8. Day 2 operations (live demo script)
 
 ### Operation 1: Rotate runtime secret now
 
@@ -197,7 +263,7 @@ terraform -chdir=terraform/vault apply
 
 ---
 
-## 8. Teardown / cleanup
+## 9. Teardown / cleanup
 
 Local:
 
@@ -211,9 +277,16 @@ Azure:
 terraform -chdir=terraform/azure destroy
 ```
 
+If you adopted existing resources and want to stop managing them in Terraform state (without deleting Azure resources):
+
+```bash
+terraform -chdir=terraform/azure-existing state rm azurerm_storage_account.existing
+terraform -chdir=terraform/azure-existing state rm azurerm_resource_group.existing
+```
+
 ---
 
-## 9. Troubleshooting
+## 10. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
@@ -226,10 +299,13 @@ terraform -chdir=terraform/azure destroy
 | `connect: connection refused` when bootstrapping Azure Vault | ACI not ready yet | Wait 30-60s, check ACI status, then retry vault bootstrap. |
 | Vault commands return `permission denied` | Wrong token in shell | `export VAULT_TOKEN=<root token from terraform output>` and retry. |
 | AppRole login fails with invalid secret id | SecretID rotated or stale value | Fetch latest output and retry login after rotation apply. |
+| `Error: Cannot import non-existent remote object` | Wrong resource names/subscription in `azure-existing` vars | Confirm resource IDs in Azure and update `resource_group_name`, `storage_account_name`, `subscription_id`. |
+| Import succeeds but plan wants to update existing resource | SKU/location/kind vars do not match current Azure resource | Set variables to exact live values or keep adoption mode as-is and avoid mutation. |
+| `Error writing secret` in `azure-existing` apply | KV mount path does not exist | Set `create_kv_mount=true` once, or use existing mount path in `vault_kv_mount`. |
 
 ---
 
-## 10. Important safety notes
+## 11. Important safety notes
 
 - This lab deploys Vault in **dev mode** for speed and simplicity.
 - It is intentionally not production-hardened.
