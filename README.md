@@ -53,6 +53,62 @@ The lab supports:
 - `curl`
 - (Optional) Vault CLI (`vault`) for interactive verification
 
+### 3.1 Install tools if missing (macOS, Linux, Windows)
+
+Use the commands below based on your OS.
+
+#### macOS (Homebrew)
+
+```bash
+brew tap hashicorp/tap
+brew install hashicorp/tap/terraform hashicorp/tap/vault azure-cli
+brew install --cask docker
+```
+
+After installing Docker Desktop, open the Docker app once and wait for it to start.
+
+#### Linux (Debian/Ubuntu)
+
+```bash
+sudo apt-get update
+sudo apt-get install -y gnupg software-properties-common curl ca-certificates lsb-release
+
+wget -O- https://apt.releases.hashicorp.com/gpg | \
+  gpg --dearmor | \
+  sudo tee /usr/share/keyrings/hashicorp-archive-keyring.gpg >/dev/null
+
+echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
+https://apt.releases.hashicorp.com $(lsb_release -cs) main" | \
+  sudo tee /etc/apt/sources.list.d/hashicorp.list
+
+curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+sudo apt-get update
+sudo apt-get install -y terraform vault docker.io
+sudo usermod -aG docker $USER
+```
+
+Log out and log in again after adding your user to the `docker` group.
+
+#### Windows (PowerShell + winget)
+
+```powershell
+winget install -e --id Hashicorp.Terraform
+winget install -e --id Hashicorp.Vault
+winget install -e --id Docker.DockerDesktop
+winget install -e --id Microsoft.AzureCLI
+```
+
+Restart your terminal after installation. Start Docker Desktop before running lab steps.
+
+### 3.2 Verify installation
+
+```bash
+terraform -version
+vault -version
+docker --version
+az version
+```
+
 Azure login:
 
 ```bash
