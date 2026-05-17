@@ -1,0 +1,6 @@
+vault_addr  = "http://127.0.0.1:8200"
+vault_token = "root"
+environment = "local"
+
+rotation_days                 = 7
+approle_secret_rotation_hours = 24

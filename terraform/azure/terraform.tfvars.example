@@ -1,0 +1,10 @@
+subscription_id = ""
+location        = "southeastasia"
+name_prefix     = "day2vaultdemo"
+vault_root_token = "root-day2-demo-change-me"
+
+tags = {
+  owner       = "platform-team"
+  environment = "demo"
+}
+
