@@ -40,6 +40,7 @@ The lab supports:
 └── terraform/
     ├── azure/                       # Azure infrastructure + Vault container
     ├── azure-existing/              # Import existing Azure resources + secure in Vault
+    ├── azure-search-actions/        # Search + import + invoke action day-2 demo
     └── vault/                       # Vault configuration (auth, policy, secrets)
 ```
 
@@ -132,6 +133,7 @@ cd secure-day2-operations
 - **Path A (Local first)**: fastest for live demo and troubleshooting
 - **Path B (Azure cloud)**: same concepts, cloud deployment
 - **Path C (Existing Azure resources)**: import existing resources into Terraform state and secure them in Vault
+- **Path D (Terraform Search + Invoke Action)**: create isolated Azure resource, discover/import with Terraform, then run day-2 action
 
 You can do both in one session.
 
@@ -319,7 +321,74 @@ terraform -chdir=terraform/vault apply
 
 ---
 
-## 9. Teardown / cleanup
+## 9. Path D - Terraform Search + Import + Invoke Action (isolated demo)
+
+This path is designed for safe live demos: create a fresh Azure resource first, then use Terraform search/import and invoke action.
+
+### Step D1: Create one isolated resource using Azure CLI
+
+```bash
+SUFFIX="$(date +%m%d%H%M)$((RANDOM%900+100))"
+RG="rg-tfsearch-demo-${SUFFIX}"
+SA="tfsearch${SUFFIX}"
+
+az group create --name "$RG" --location southeastasia --tags scenario=tf-search-actions-demo created-by=lab
+az storage account create \
+  --name "$SA" \
+  --resource-group "$RG" \
+  --location southeastasia \
+  --sku Standard_LRS \
+  --kind StorageV2 \
+  --min-tls-version TLS1_2 \
+  --tags scenario=tf-search-actions-demo environment=demo created-by=lab
+```
+
+### Step D2: Run Terraform Search + Import + Action stack
+
+```bash
+export SUB_ID="$(az account show --query id -o tsv)"
+export VAULT_ADDR="$(terraform -chdir=terraform/azure output -raw vault_address)"
+export VAULT_TOKEN="$(terraform -chdir=terraform/azure output -raw vault_root_token)"
+
+terraform -chdir=terraform/azure-search-actions init
+terraform -chdir=terraform/azure-search-actions apply \
+  -var="subscription_id=${SUB_ID}" \
+  -var="resource_group_name=${RG}" \
+  -var="storage_account_name=${SA}" \
+  -var='search_required_tags={scenario="tf-search-actions-demo"}' \
+  -var="vault_addr=${VAULT_ADDR}" \
+  -var="vault_token=${VAULT_TOKEN}" \
+  -var='storage_key_to_regenerate=key1' \
+  -var='invoke_action_nonce=demo-run-1'
+```
+
+What this demonstrates:
+
+1. **Terraform search** finds the target storage account (`azurerm_resources`).
+2. **Terraform import blocks** adopt resource group + storage account into state.
+3. **Invoke action** rotates storage key (`azapi_resource_action`).
+4. Updated access data is synced to Vault KV path:
+   `app/data/platform/azure/search-actions-storage-account`.
+
+### Step D3: Showcase day-2 operation by invoking action again
+
+```bash
+terraform -chdir=terraform/azure-search-actions apply \
+  -var="subscription_id=${SUB_ID}" \
+  -var="resource_group_name=${RG}" \
+  -var="storage_account_name=${SA}" \
+  -var='search_required_tags={scenario="tf-search-actions-demo"}' \
+  -var="vault_addr=${VAULT_ADDR}" \
+  -var="vault_token=${VAULT_TOKEN}" \
+  -var='storage_key_to_regenerate=key1' \
+  -var='invoke_action_nonce=demo-run-2'
+```
+
+Changing `invoke_action_nonce` forces action re-run (safe demo-friendly day-2 trigger).
+
+---
+
+## 10. Teardown / cleanup
 
 Local:
 
@@ -333,6 +402,12 @@ Azure:
 terraform -chdir=terraform/azure destroy
 ```
 
+Isolated Path D resource cleanup:
+
+```bash
+az group delete --name "$RG" --yes --no-wait
+```
+
 If you adopted existing resources and want to stop managing them in Terraform state (without deleting Azure resources):
 
 ```bash
@@ -342,7 +417,7 @@ terraform -chdir=terraform/azure-existing state rm azurerm_resource_group.existi
 
 ---
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
@@ -358,10 +433,12 @@ terraform -chdir=terraform/azure-existing state rm azurerm_resource_group.existi
 | `Error: Cannot import non-existent remote object` | Wrong resource names/subscription in `azure-existing` vars | Confirm resource IDs in Azure and update `resource_group_name`, `storage_account_name`, `subscription_id`. |
 | Import succeeds but plan wants to update existing resource | SKU/location/kind vars do not match current Azure resource | Set variables to exact live values or keep adoption mode as-is and avoid mutation. |
 | `Error writing secret` in `azure-existing` apply | KV mount path does not exist | Set `create_kv_mount=true` once, or use existing mount path in `vault_kv_mount`. |
+| `Invalid value for one(...)` in `azure-search-actions` | Search returned zero or multiple storage accounts | Pass explicit `storage_account_name` or tighten `search_required_tags`. |
+| `azapi_resource_action` did not re-run | Same nonce value reused | Change `invoke_action_nonce` to a new value and apply again. |
 
 ---
 
-## 11. Important safety notes
+## 12. Important safety notes
 
 - This lab deploys Vault in **dev mode** for speed and simplicity.
 - It is intentionally not production-hardened.

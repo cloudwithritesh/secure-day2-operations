@@ -1,0 +1,19 @@
+subscription_id      = ""
+resource_group_name  = "rg-day2vaultdemo7959"
+storage_account_name = "day2vaultdemo7959"
+
+search_required_tags = {
+  environment = "demo"
+}
+
+vault_addr  = "http://127.0.0.1:8200"
+vault_token = "root"
+
+vault_kv_mount   = "app"
+vault_secret_name = "platform/azure/search-actions-storage-account"
+
+storage_key_to_regenerate = "key1"
+
+# Change nonce value to force re-running invoke action on next apply.
+invoke_action_nonce = "initial-run"
+

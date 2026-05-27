@@ -1,8 +1,9 @@
 TF_AZURE_DIR := terraform/azure
 TF_AZURE_EXISTING_DIR := terraform/azure-existing
+TF_AZURE_SEARCH_ACTIONS_DIR := terraform/azure-search-actions
 TF_VAULT_DIR := terraform/vault
 
-.PHONY: local-up local-down local-logs local-bootstrap azure-init azure-apply azure-destroy azure-existing-init azure-existing-apply vault-init vault-fmt
+.PHONY: local-up local-down local-logs local-bootstrap azure-init azure-apply azure-destroy azure-existing-init azure-existing-apply azure-search-actions-init azure-search-actions-apply vault-init vault-fmt
 
 local-up:
 	docker compose up -d vault
@@ -35,6 +36,12 @@ azure-existing-init:
 
 azure-existing-apply:
 	terraform -chdir=$(TF_AZURE_EXISTING_DIR) apply
+
+azure-search-actions-init:
+	terraform -chdir=$(TF_AZURE_SEARCH_ACTIONS_DIR) init
+
+azure-search-actions-apply:
+	terraform -chdir=$(TF_AZURE_SEARCH_ACTIONS_DIR) apply
 
 vault-init:
 	terraform -chdir=$(TF_VAULT_DIR) init
