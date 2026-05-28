@@ -1,21 +1,25 @@
 output "db_host" {
-  description = "Database host (non-sensitive)"
+  description = "Database host — sensitive because it originates from a Vault KV secret object"
   value       = local.db_config.host
+  sensitive   = true
 }
 
 output "db_port" {
-  description = "Database port (non-sensitive)"
+  description = "Database port — sensitive because it originates from a Vault KV secret object"
   value       = local.db_config.port
+  sensitive   = true
 }
 
 output "db_name" {
-  description = "Database name (non-sensitive)"
+  description = "Database name — sensitive because it originates from a Vault KV secret object"
   value       = local.db_config.name
+  sensitive   = true
 }
 
 output "db_user" {
-  description = "Database service account username (non-sensitive)"
+  description = "Database service account username — sensitive because it originates from a Vault KV secret object"
   value       = local.db_config.user
+  sensitive   = true
 }
 
 # Password is sensitive — only available to the process, not logged
