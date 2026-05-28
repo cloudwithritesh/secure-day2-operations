@@ -1,0 +1,6 @@
+aws_region           = "ap-southeast-1"
+aws_profile          = "default"
+instance_id          = "i-0123456789abcdef0"
+force_stop           = false
+stop_timeout_seconds = 600
+invoke_nonce         = "run-1"

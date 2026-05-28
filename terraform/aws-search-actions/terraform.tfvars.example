@@ -1,0 +1,13 @@
+aws_region         = "us-east-1"
+aws_profile        = ""
+bucket_name        = ""
+search_tag_key     = "ManagedBy"
+search_tag_value   = "unmanaged"
+invoke_action_nonce = "demo-run-1"
+enable_vault_sync  = false
+
+# Set these only when enable_vault_sync=true.
+vault_addr         = ""
+vault_token        = ""
+vault_kv_mount     = "app"
+vault_secret_name  = "platform/aws/s3-day2-action"

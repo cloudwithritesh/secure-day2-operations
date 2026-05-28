@@ -1,10 +1,10 @@
-# Secure Day 2 Operations Lab (Terraform + Vault CE + Azure)
+# Secure Day 2 Operations Lab (Terraform + Vault CE + Azure/AWS)
 
 This repository is a **30-minute, hands-on lab** to demonstrate how to secure Day 2 operations using:
 
 - **Terraform** as infrastructure and security automation code
 - **Vault Community Edition** for secret lifecycle and controlled access
-- **Azure** as the cloud environment
+- **Azure and AWS** as cloud environments
 
 The lab supports:
 
@@ -40,7 +40,8 @@ The lab supports:
 └── terraform/
     ├── azure/                       # Azure infrastructure + Vault container
     ├── azure-existing/              # Import existing Azure resources + secure in Vault
-    ├── azure-search-actions/        # Search + import + invoke action day-2 demo
+    ├── azure-search-actions/        # Azure discovery + import + invoke action day-2 demo
+    ├── aws-search-actions/          # AWS Terraform Search + import + invoke action day-2 demo
     └── vault/                       # Vault configuration (auth, policy, secrets)
 ```
 
@@ -48,7 +49,7 @@ The lab supports:
 
 ## 3. Prerequisites
 
-- Terraform `>= 1.6`
+- Terraform `>= 1.14` (required for Terraform Search / `terraform query`)
 - Docker Desktop (for local mode)
 - Azure CLI (`az`) logged in to your subscription
 - `curl`
@@ -133,7 +134,9 @@ cd secure-day2-operations
 - **Path A (Local first)**: fastest for live demo and troubleshooting
 - **Path B (Azure cloud)**: same concepts, cloud deployment
 - **Path C (Existing Azure resources)**: import existing resources into Terraform state and secure them in Vault
-- **Path D (Terraform Search + Invoke Action)**: create isolated Azure resource, discover/import with Terraform, then run day-2 action
+- **Path D (Azure discovery + import + invoke action)**: create isolated Azure resource, discover/import with Terraform, then run day-2 action
+- **Path E (AWS Terraform Search + import + invoke action)**: search unmanaged S3 buckets, import to state, invoke day-2 action, and sync metadata to Vault
+- **Path F (Terraform Actions Invoke - Azure/AWS)**: run day-2 provider actions with `terraform plan/apply -invoke` and lifecycle `action_trigger`
 
 You can do both in one session.
 
@@ -321,7 +324,7 @@ terraform -chdir=terraform/vault apply
 
 ---
 
-## 9. Path D - Terraform Search + Import + Invoke Action (isolated demo)
+## 9. Path D - Azure discovery + import + invoke action (isolated demo)
 
 This path is designed for safe live demos: create a fresh Azure resource first, then use Terraform search/import and invoke action.
 
@@ -343,7 +346,18 @@ az storage account create \
   --tags scenario=tf-search-actions-demo environment=demo created-by=lab
 ```
 
-### Step D2: Run Terraform Search + Import + Action stack
+### Step D2: (Optional) Run Terraform Search query for Azure
+
+`terraform/azure-search-actions/search.tfquery.hcl` contains a Terraform Search query definition.
+
+```bash
+terraform -chdir=terraform/azure-search-actions init
+terraform -chdir=terraform/azure-search-actions query
+```
+
+If your runtime/provider combination does not support the Azure query type yet, continue with Step D3 (the deterministic discovery/import flow).
+
+### Step D3: Run import + action stack
 
 ```bash
 export SUB_ID="$(az account show --query id -o tsv)"
@@ -364,13 +378,14 @@ terraform -chdir=terraform/azure-search-actions apply \
 
 What this demonstrates:
 
-1. **Terraform search** finds the target storage account (`azurerm_resources`).
-2. **Terraform import blocks** adopt resource group + storage account into state.
-3. **Invoke action** rotates storage key (`azapi_resource_action`).
-4. Updated access data is synced to Vault KV path:
+1. **Terraform Search config** is available in `search.tfquery.hcl` for query-driven discovery where supported.
+2. **Terraform-based discovery** fallback finds the target storage account (`azurerm_resources`).
+3. **Terraform import blocks** adopt resource group + storage account into state.
+4. **Invoke action** rotates storage key (`azapi_resource_action`).
+5. Updated access data is synced to Vault KV path:
    `app/data/platform/azure/search-actions-storage-account`.
 
-### Step D3: Showcase day-2 operation by invoking action again
+### Step D4: Showcase day-2 operation by invoking action again
 
 ```bash
 terraform -chdir=terraform/azure-search-actions apply \
@@ -388,7 +403,156 @@ Changing `invoke_action_nonce` forces action re-run (safe demo-friendly day-2 tr
 
 ---
 
-## 10. Teardown / cleanup
+## 10. Path E - AWS Terraform Search + import + invoke action
+
+This path uses Terraform Search (`list` blocks + `terraform query`) and then imports selected resources into Terraform state.
+
+### Step E1: Prepare one unmanaged S3 bucket (example)
+
+```bash
+AWS_REGION="us-east-1"
+BUCKET="tfsearch-unmanaged-$RANDOM-$(date +%m%d%H%M%S)"
+
+aws s3api create-bucket \
+  --region "$AWS_REGION" \
+  --bucket "$BUCKET"
+
+aws s3api put-bucket-tagging \
+  --region "$AWS_REGION" \
+  --bucket "$BUCKET" \
+  --tagging 'TagSet=[{Key=ManagedBy,Value=unmanaged},{Key=scenario,Value=tf-search-actions-demo}]'
+```
+
+### Step E2: Run Terraform Search query
+
+`terraform/aws-search-actions/search.tfquery.hcl` contains the `list` query definition.
+
+```bash
+terraform -chdir=terraform/aws-search-actions init
+terraform -chdir=terraform/aws-search-actions query
+```
+
+Review query output and select target bucket name.
+
+### Step E3: Import + invoke day-2 action + write to Vault
+
+```bash
+cp terraform/aws-search-actions/terraform.tfvars.example terraform/aws-search-actions/terraform.tfvars
+```
+
+Edit `terraform/aws-search-actions/terraform.tfvars` and set:
+
+- `aws_region`
+- `bucket_name` (optional if exactly one search result exists)
+- `enable_vault_sync` (`false` for AWS-only demo)
+- `vault_addr`, `vault_token` (only when `enable_vault_sync=true`)
+
+Apply:
+
+```bash
+terraform -chdir=terraform/aws-search-actions apply
+```
+
+What this demonstrates:
+
+1. Terraform Search query identifies unmanaged S3 bucket resources.
+2. Terraform `import` block brings one S3 bucket under state management.
+3. Day-2 invoke action is executed via Terraform (`aws s3api put-bucket-versioning`) triggered by nonce.
+4. Operation metadata is written to Vault KV path:
+  `app/data/platform/aws/s3-day2-action`.
+
+### Step E4: Re-run day-2 action safely
+
+```bash
+terraform -chdir=terraform/aws-search-actions apply \
+  -var='invoke_action_nonce=demo-run-2'
+```
+
+Changing `invoke_action_nonce` forces only the action path to re-run.
+
+---
+
+## 11. Path F - Terraform Actions Invoke (Azure + AWS day-2)
+
+This path demonstrates native Terraform Actions using the `action` block and the CLI `-invoke` flag, based on Terraform 1.14+.
+
+### Step F1: AWS action demo (`aws_ec2_stop_instance`)
+
+Prepare vars:
+
+```bash
+cp terraform/aws-actions-invoke/terraform.tfvars.example terraform/aws-actions-invoke/terraform.tfvars
+```
+
+Edit `terraform/aws-actions-invoke/terraform.tfvars` and set a real running EC2 instance ID.
+
+Run standalone action dry-run:
+
+```bash
+terraform -chdir=terraform/aws-actions-invoke init
+terraform -chdir=terraform/aws-actions-invoke plan \
+  -invoke=action.aws_ec2_stop_instance.day2_stop
+```
+
+Run standalone action apply:
+
+```bash
+terraform -chdir=terraform/aws-actions-invoke apply \
+  -invoke=action.aws_ec2_stop_instance.day2_stop
+```
+
+### Step F2: Azure action demo (`azurerm_virtual_machine_power`)
+
+Prepare vars:
+
+```bash
+cp terraform/azure-actions-invoke/terraform.tfvars.example terraform/azure-actions-invoke/terraform.tfvars
+```
+
+Edit `terraform/azure-actions-invoke/terraform.tfvars` and set a real VM resource ID.
+
+Run standalone action dry-run:
+
+```bash
+terraform -chdir=terraform/azure-actions-invoke init
+terraform -chdir=terraform/azure-actions-invoke plan \
+  -invoke=action.azurerm_virtual_machine_power.day2_power
+```
+
+Run standalone action apply:
+
+```bash
+terraform -chdir=terraform/azure-actions-invoke apply \
+  -invoke=action.azurerm_virtual_machine_power.day2_power
+```
+
+### Step F3: Lifecycle-triggered invoke demo
+
+Both modules include a `terraform_data` resource with `lifecycle.action_trigger` so actions can run during normal apply when you change nonce.
+
+AWS:
+
+```bash
+terraform -chdir=terraform/aws-actions-invoke apply \
+  -var='invoke_nonce=run-2'
+```
+
+Azure:
+
+```bash
+terraform -chdir=terraform/azure-actions-invoke apply \
+  -var='invoke_nonce=run-2'
+```
+
+What this demonstrates:
+
+1. Native Terraform Actions in provider workflows (not `null_resource` scripts).
+2. Ad hoc day-2 operations via CLI `-invoke`.
+3. Lifecycle-bound day-2 operations using `action_trigger`.
+
+---
+
+## 12. Teardown / cleanup
 
 Local:
 
@@ -415,14 +579,21 @@ terraform -chdir=terraform/azure-existing state rm azurerm_storage_account.exist
 terraform -chdir=terraform/azure-existing state rm azurerm_resource_group.existing
 ```
 
+AWS cleanup example:
+
+```bash
+terraform -chdir=terraform/aws-search-actions destroy
+```
+
 ---
 
-## 11. Troubleshooting
+## 13. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `terraform: command not found` | Terraform not installed or not in `PATH` | Install Terraform >= 1.6 and reopen terminal. |
+| `terraform: command not found` | Terraform not installed or not in `PATH` | Install Terraform >= 1.14 and reopen terminal. |
 | `Error: failed to query available provider packages` | Network/proxy restrictions to registry | Configure corporate proxy, then retry `terraform init`. |
+| `terraform query` is not available | Terraform version < 1.14 or unsupported runtime mode | Upgrade Terraform and run in a compatible workspace/runtime. |
 | `Vault was not reachable` in local mode | Container still starting or port conflict on 8200 | Run `docker compose logs -f vault`; stop conflicting process and re-run `make local-up`. |
 | `permission denied` running script | Script lost executable bit | Run `chmod +x scripts/*.sh`. |
 | `Error building AzureRM Client` | `az login` missing or wrong subscription context | Run `az login` and `az account set --subscription <SUBSCRIPTION_ID>`. |
@@ -435,11 +606,13 @@ terraform -chdir=terraform/azure-existing state rm azurerm_resource_group.existi
 | `Error writing secret` in `azure-existing` apply | KV mount path does not exist | Set `create_kv_mount=true` once, or use existing mount path in `vault_kv_mount`. |
 | `Invalid value for one(...)` in `azure-search-actions` | Search returned zero or multiple storage accounts | Pass explicit `storage_account_name` or tighten `search_required_tags`. |
 | `azapi_resource_action` did not re-run | Same nonce value reused | Change `invoke_action_nonce` to a new value and apply again. |
+| `unmanaged_buckets` selection failed with one(...) error | Query returned zero or multiple buckets | Pass `bucket_name` explicitly or tighten search tags. |
 
 ---
 
-## 12. Important safety notes
+## 14. Important safety notes
 
 - This lab deploys Vault in **dev mode** for speed and simplicity.
 - It is intentionally not production-hardened.
 - For production, use TLS, persistent Raft storage, auto-unseal, private networking, least-privilege identity, secure token handling, and audit logging.
+- Terraform Search support is provider/resource specific and evolves by release; verify supported types for your exact Terraform/provider versions.
