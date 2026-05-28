@@ -2,7 +2,17 @@
 
 > **Session duration:** 30 minutes  
 > **Audience:** Platform/DevOps engineers  
-> **Goal:** Show how Vault AppRoles + Terraform eliminate manual credential rotation
+> **Scenarios:** 3 — Basics → Search/Import/Invoke → Secure Credential Renewal
+
+---
+
+## Session overview
+
+| # | Scenario | Workspace | Time | Theme |
+|---|---|---|---|---|
+| 1 | Terraform + Vault Basics | `terraform/vault/` | ~8 min | Secrets as code, auto-rotating secrets |
+| 2 | Search + Import + Invoke Action | `terraform/azure-search-actions/` | ~10 min | Bring existing Azure resources under Terraform + rotate their keys into Vault |
+| 3 | Secure Credential Renewal | `vault-platform` → `vault-app-readonly` → `vault-rotate-action` | ~10 min | AppRoles, least-privilege, zero manual intervention |
 
 ---
 
@@ -26,13 +36,23 @@ vault auth list      # should show only token/
 terraform version
 vault version
 jq --version
+
+# 5. For Scenario 2 — authenticate to Azure
+az login
+export SUB_ID=$(az account show --query id -o tsv)
 ```
 
 ---
 
-## Step 1 — Open the show (2 min)
+# Scenario 1 — Terraform + Vault Basics (~8 min)
 
-**Say:** *"Vault is running locally in dev mode via Docker. In production this would be an ACI container in Azure or a Vault cluster. The root token is 'root' — fine for demo, not production."*
+> **Theme:** Secrets as code. Vault is the source of truth. Terraform manages everything.
+
+---
+
+## S1 Step 1 — Open the show (1 min)
+
+**Say:** *"Vault is running locally in dev mode via Docker. In production this would be an ACI container in Azure. The root token is `root` — fine for demo, not production."*
 
 ```bash
 vault status
@@ -44,7 +64,238 @@ vault auth list
 
 ---
 
-## Step 2 — Platform team deploys policies + AppRoles (5 min)
+## S1 Step 2 — Apply the vault basics workspace (4 min)
+
+**Say:** *"We're going to let Terraform create everything in Vault — the KV engine, the policies, the AppRole, and a rotating secret. All in code, all version-controlled."*
+
+Show the file first:
+
+```bash
+cat terraform/vault/main.tf
+```
+
+**Point out:**
+- `vault_mount` — KV v2 engine at `app/`
+- `vault_policy.ops_admin` / `vault_policy.app_reader` — two policies, different scopes
+- `vault_approle_auth_backend_role.demo_app` — AppRole with 1 hr token TTL
+- `time_rotating` + `random_password` + `vault_kv_secret_v2` — **auto-rotating secret**: password regenerates every N days automatically
+- `vault_approle_auth_backend_role_secret_id` — SecretID also tied to a rotation schedule
+
+**Run it:**
+
+```bash
+terraform -chdir=terraform/vault apply -auto-approve \
+  -var="vault_addr=http://127.0.0.1:8200" \
+  -var="vault_token=root" \
+  -var="environment=local" \
+  -var="rotation_days=7" \
+  -var="approle_secret_rotation_hours=24"
+```
+
+**Expected output:**
+
+```
+Apply complete! Resources: 7 added, 0 changed, 0 destroyed.
+
+Outputs:
+  kv_mount_path       = "app"
+  approle_backend_path = "approle"
+  approle_role_name   = "demo-app"
+  demo_app_secret_id  = <sensitive>
+  runtime_secret_path = "app/data/payments-api/runtime"
+```
+
+---
+
+## S1 Step 3 — Inspect what Terraform created in Vault (2 min)
+
+```bash
+# Show the KV mount and the rotating secret
+vault kv get app/payments-api/runtime
+
+# Show the AppRole
+vault read auth/approle/role/demo-app
+
+# Show the policies
+vault policy read app-reader
+vault policy read ops-admin
+```
+
+**Key message for `app-reader` policy:** It can only read `app/data/payments-api/*` — nothing else in Vault.
+
+---
+
+## S1 Step 4 — Show the rotation trigger (1 min)
+
+**Say:** *"If I re-apply with `rotation_days=0` (for demo), `time_rotating` fires, `random_password` gets new `keepers`, regenerates, and Terraform writes the new password to Vault — zero human involvement."*
+
+```bash
+# In real demo just show the concept — changing rotation_days forces a new password
+terraform -chdir=terraform/vault plan \
+  -var="vault_addr=http://127.0.0.1:8200" \
+  -var="vault_token=root" \
+  -var="environment=local" \
+  -var="rotation_days=7" \
+  -var="approle_secret_rotation_hours=24" 2>&1 | grep -E "No changes|random_password|vault_kv"
+```
+
+**Key message:** `time_rotating` is the cron job replacement. CI/CD runs `terraform apply` on schedule — rotation is automatic.
+
+---
+
+# Scenario 2 — Terraform Search + Import + Invoke Action (~10 min)
+
+> **Theme:** Existing Azure resources brought under Terraform control. Keys rotated via API action. Result synced to Vault.
+
+---
+
+## S2 Step 1 — Create a fresh Azure resource to import (2 min)
+
+**Say:** *"We'll create one real Azure storage account with the CLI — representing an existing resource that predates Terraform."*
+
+```bash
+SUFFIX=$(date +%m%d%H%M%S)
+RG="rg-tfsearch-demo-${SUFFIX}"
+SA="tfsearch${SUFFIX}"
+
+az group create --name "$RG" --location southeastasia \
+  --tags scenario=tf-search-actions-demo
+
+az storage account create \
+  --name "$SA" \
+  --resource-group "$RG" \
+  --sku Standard_LRS \
+  --kind StorageV2 \
+  --tags scenario=tf-search-actions-demo
+
+echo "RG=$RG"
+echo "SA=$SA"
+```
+
+---
+
+## S2 Step 2 — Show the workspace (1 min)
+
+```bash
+cat terraform/azure-search-actions/main.tf
+```
+
+**Point out these key sections:**
+
+1. **`data "azurerm_resources"`** (line 7) — searches Azure for storage accounts matching the tag filter — no hardcoded IDs
+2. **`import { to = ... id = ... }`** (lines 54–62) — declarative import, Terraform 1.6+ syntax. No `terraform import` CLI needed.
+3. **`azapi_resource_action.regenerate_storage_key`** (line 68) — calls Azure's `regenerateKey` ARM API directly from Terraform
+4. **`replace_triggered_by = [terraform_data.invoke_nonce]`** (line 81) — nonce change forces key regeneration on demand
+5. **`vault_kv_secret_v2.storage_account_access`** (line 93) — result (new key + metadata) written to Vault immediately
+
+---
+
+## S2 Step 3 — Apply: search, import, rotate, sync to Vault (5 min)
+
+```bash
+# Ensure Vault basics workspace is still applied (scenario 1 must be done first)
+# The app KV mount at "app/" is used by this workspace
+
+terraform -chdir=terraform/azure-search-actions init
+
+terraform -chdir=terraform/azure-search-actions apply -auto-approve \
+  -var="subscription_id=${SUB_ID}" \
+  -var="resource_group_name=${RG}" \
+  -var="storage_account_name=${SA}" \
+  -var='search_required_tags={"scenario":"tf-search-actions-demo"}' \
+  -var="vault_addr=http://127.0.0.1:8200" \
+  -var="vault_token=root" \
+  -var='vault_kv_mount=app' \
+  -var='vault_secret_name=platform/azure/search-actions-storage-account' \
+  -var='storage_key_to_regenerate=key1' \
+  -var='invoke_action_nonce=demo-run-1'
+```
+
+**Expected output:**
+
+```
+Apply complete! Resources: 4 added, 0 changed, 0 destroyed.
+
+Outputs:
+  search_matches    = ["<storage-account-name>"]
+  vault_secret_path = "app/data/platform/azure/search-actions-storage-account"
+```
+
+**Verify in Vault:**
+
+```bash
+vault kv get app/platform/azure/search-actions-storage-account
+```
+
+---
+
+## S2 Step 4 — Day 2: rotate the key again on demand (2 min)
+
+**Say:** *"Key needs rotating again — audit finding, breach, policy deadline. One variable change."*
+
+```bash
+terraform -chdir=terraform/azure-search-actions apply -auto-approve \
+  -var="subscription_id=${SUB_ID}" \
+  -var="resource_group_name=${RG}" \
+  -var="storage_account_name=${SA}" \
+  -var='search_required_tags={"scenario":"tf-search-actions-demo"}' \
+  -var="vault_addr=http://127.0.0.1:8200" \
+  -var="vault_token=root" \
+  -var='vault_kv_mount=app' \
+  -var='vault_secret_name=platform/azure/search-actions-storage-account' \
+  -var='storage_key_to_regenerate=key1' \
+  -var='invoke_action_nonce=demo-run-2'
+```
+
+```bash
+# Show Vault KV advanced to version 2
+vault kv metadata get app/platform/azure/search-actions-storage-account
+```
+
+**Key messages:**
+1. `invoke_action_nonce=demo-run-2` → `terraform_data` replaces → `azapi_resource_action` fires → new key generated in Azure → written to Vault
+2. `current_version = 2` in KV metadata = full audit history of every rotation
+
+---
+
+## S2 Cleanup
+
+```bash
+az group delete --name "$RG" --yes --no-wait
+terraform -chdir=terraform/azure-search-actions destroy -auto-approve \
+  -var="subscription_id=${SUB_ID}" \
+  -var="resource_group_name=${RG}" \
+  -var="storage_account_name=${SA}" \
+  -var='search_required_tags={"scenario":"tf-search-actions-demo"}' \
+  -var="vault_addr=http://127.0.0.1:8200" \
+  -var="vault_token=root" \
+  -var='vault_kv_mount=app' \
+  -var='vault_secret_name=platform/azure/search-actions-storage-account' \
+  -var='storage_key_to_regenerate=key1' \
+  -var='invoke_action_nonce=demo-run-2'
+```
+
+---
+
+# Scenario 3 — Secure Credential Renewal (~10 min)
+
+> **Theme:** Three workspaces, three trust levels. AppRoles enforce least-privilege. Rotation is fully automated — no human ever touches a SecretID again.
+
+## S3 Step 1 — Show clean Vault (1 min)
+
+**Say:** *"Clean setup — Vault running, no existing policies or AppRoles yet."*
+
+```bash
+vault status
+vault secrets list
+vault auth list
+```
+
+**Key message:** Clean slate — no AppRoles, no policies, no app secrets yet.
+
+---
+
+## S3 Step 2 — Platform team deploys policies + AppRoles (5 min)
 
 **Say:** *"The platform team owns this workspace. App teams never touch it. They define the trust boundaries in code."*
 
@@ -86,7 +337,7 @@ Outputs:
 
 ---
 
-## Step 3 — Bootstrap: distribute the first SecretID (3 min)
+## S3 Step 3 — Bootstrap: distribute the first SecretID (3 min)
 
 **Say:** *"This is the ONE time a human is involved. After this, everything is automated."*
 
@@ -125,7 +376,7 @@ VAULT_TOKEN="$ROTATOR_TOKEN"  vault token lookup -format=json | jq -r '.data.pol
 
 ---
 
-## Step 4 — App team workspace: least-privilege in action (5 min)
+## S3 Step 4 — App team workspace: least-privilege in action (5 min)
 
 **Say:** *"The app team gets a token. Their Terraform provider uses it. They literally cannot do anything outside their one path."*
 
@@ -172,7 +423,7 @@ Outputs:
 
 ---
 
-## Step 5 — Automated rotation: the Day 2 money shot (7 min)
+## S3 Step 5 — Automated rotation: the Day 2 money shot (7 min)
 
 **Say:** *"This is the core of Day 2 operations. CI/CD runs `terraform apply` on a cron schedule. No human is ever involved again."*
 
@@ -220,7 +471,7 @@ Even if this token were compromised, the blast radius is a single AppRole's Secr
 
 ---
 
-## Step 6 — Emergency rotation: one variable, instant rotation (3 min)
+## S3 Step 6 — Emergency rotation: one variable, instant rotation (3 min)
 
 **Say:** *"Breach detected. We need to rotate NOW. No SSH. No Vault admin login. One variable change."*
 
@@ -256,7 +507,7 @@ Version 3  created_time = ...  ← emergency nonce change
 
 ---
 
-## Step 7 — The trust model summary (2 min)
+## S3 Step 7 — The trust model summary (2 min)
 
 **Say:** *"Three workspaces, three trust levels, zero privilege escalation."*
 
