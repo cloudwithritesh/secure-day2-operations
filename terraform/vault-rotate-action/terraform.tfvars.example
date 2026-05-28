@@ -1,0 +1,9 @@
+# Copy to terraform.tfvars and fill in your values.
+# rotator_token is obtained by running:
+#   vault write auth/approle/login role_id=<rotator_role_id> secret_id=<rotator_secret_id>
+vault_addr     = "http://127.0.0.1:8200"
+rotator_token  = "REPLACE_WITH_ROTATOR_TOKEN"  # never commit this value
+app_role_name  = "payments-app"
+kv_mount       = "secrets"
+rotation_hours = 24
+rotation_nonce = "initial"    # change to any value to trigger on-demand rotation

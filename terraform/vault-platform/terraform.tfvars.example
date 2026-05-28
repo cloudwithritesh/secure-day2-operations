@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars and fill in your values
+vault_addr            = "http://127.0.0.1:8200"
+vault_token           = "root"          # dev mode default; use a real token in production
+environment           = "dev"
+app_name              = "payments"
+secret_rotation_hours = 24

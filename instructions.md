@@ -333,3 +333,231 @@ Use these as copy-ready snippets. Remove `#` from one line at a time when you ex
 #   -var="subscription_id=${SUB_ID}" \
 #   -var="vault_root_token=${VAULT_TOKEN}"
 ```
+
+---
+
+## 9. Scenario 3 — Secure Credential Renewal (No Manual Intervention)
+
+**Story:** The platform team controls all Vault policies and AppRoles. The app team
+only gets a scoped token that can read its own secrets. Credential rotation happens
+automatically on a schedule — no human ever touches a SecretID again.
+
+### 9.1 Prerequisites
+
+Vault must be running. For local demo use docker-compose:
+
+```bash
+# Start local Vault in dev mode
+docker-compose up -d vault
+sleep 3
+export VAULT_ADDR="http://127.0.0.1:8200"
+export VAULT_TOKEN="root"
+vault status
+```
+
+Or point to the Azure ACI Vault instance if already deployed:
+
+```bash
+# export VAULT_ADDR="http://<aci-dns>.southeastasia.azurecontainer.io:8200"
+# export VAULT_TOKEN="<vault-root-token>"
+```
+
+### 9.2 Step 1 — Platform Team deploys policies + AppRoles
+
+**Who runs this:** Platform / Infra team only. Never shared with app teams.
+
+```bash
+cd terraform/vault-platform
+cp terraform.tfvars.example terraform.tfvars
+# Edit terraform.tfvars: set vault_addr and vault_token
+
+terraform init
+terraform plan
+terraform apply -auto-approve
+```
+
+**Expected outputs:**
+
+```
+app_role_id          = "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"  # safe to share
+rotator_role_id      = "yyyyyyyy-yyyy-yyyy-yyyy-yyyyyyyyyyyy"  # safe to share
+kv_mount_path        = "secrets"
+db_credentials_path  = "secrets/data/payments-api/db-credentials"
+app_reader_policy    = "payments-app-reader"
+rotator_policy       = "payments-rotator"
+demo_hint            = "SecretID must be distributed out-of-band..."
+```
+
+**Key point for audience:** Notice we output `role_id` only — never `secret_id`.
+The SecretID is distributed out-of-band (CI/CD variable, vault agent, or the rotator workspace).
+
+### 9.3 Step 2 — Distribute the initial SecretID (one-time bootstrap)
+
+Platform team generates the FIRST SecretID and passes it to the app team securely
+(e.g., via a CI/CD secret variable, 1Password, or Vault agent).
+
+```bash
+# Platform team generates initial SecretID for the app AppRole
+APP_ROLE_ID=$(terraform -chdir=terraform/vault-platform output -raw app_role_id)
+APP_SECRET_ID=$(vault write -format=json -f auth/approle/role/payments-app/secret-id \
+  | jq -r '.data.secret_id')
+
+echo "App RoleID:   $APP_ROLE_ID"
+echo "App SecretID: $APP_SECRET_ID"   # pass this to app team securely — one time only
+
+# Also generate SecretID for the rotator AppRole (used by automation)
+ROTATOR_ROLE_ID=$(terraform -chdir=terraform/vault-platform output -raw rotator_role_id)
+ROTATOR_SECRET_ID=$(vault write -format=json -f auth/approle/role/payments-rotator/secret-id \
+  | jq -r '.data.secret_id')
+
+echo "Rotator RoleID:   $ROTATOR_ROLE_ID"
+echo "Rotator SecretID: $ROTATOR_SECRET_ID"
+```
+
+### 9.4 Step 3 — App Team logs in and reads secrets
+
+**Who runs this:** App team with their scoped AppRole credentials.
+
+```bash
+# App team exchanges (role_id + secret_id) for a scoped Vault token
+APP_TOKEN=$(vault write -format=json auth/approle/login \
+  role_id="$APP_ROLE_ID" \
+  secret_id="$APP_SECRET_ID" \
+  | jq -r '.auth.client_token')
+
+echo "App token: $APP_TOKEN"
+
+# The token is scoped to payments-app-reader ONLY
+# Verify what it can and cannot do:
+VAULT_TOKEN="$APP_TOKEN" vault kv get secrets/payments-api/db-credentials   # ✅ allowed
+# VAULT_TOKEN="$APP_TOKEN" vault kv list secrets/                            # ❌ denied
+# VAULT_TOKEN="$APP_TOKEN" vault policy list                                  # ❌ denied
+```
+
+Now run the app-readonly Terraform workspace:
+
+```bash
+cd terraform/vault-app-readonly
+cp terraform.tfvars.example terraform.tfvars
+# Set approle_token = "$APP_TOKEN" in terraform.tfvars
+
+terraform init
+terraform apply -auto-approve
+```
+
+**Expected outputs** (shows what the app can read):
+
+```
+db_host         = "db.internal.example.com"
+db_port         = "5432"
+db_name         = "payments_prod"
+db_user         = "payments_svc"
+db_password     = <sensitive>
+secret_version  = 1
+kv_path_read    = "secrets/data/payments-api/db-credentials"
+```
+
+**Demonstrate to audience:** The `db_password` is marked `sensitive` and will not
+appear in Terraform logs or CI/CD output — it exists only in the process environment.
+
+### 9.5 Step 4 — Automated credential rotation (Day 2 operation)
+
+**Who runs this:** A CI/CD pipeline on a cron schedule — no human involved.
+
+First, get the rotator token:
+
+```bash
+ROTATOR_TOKEN=$(vault write -format=json auth/approle/login \
+  role_id="$ROTATOR_ROLE_ID" \
+  secret_id="$ROTATOR_SECRET_ID" \
+  | jq -r '.auth.client_token')
+
+echo "Rotator token: $ROTATOR_TOKEN"
+# This token can ONLY: generate SecretIDs + write to secrets/payments-app/current-secret-id
+# Verify the constraint:
+VAULT_TOKEN="$ROTATOR_TOKEN" vault policy read payments-rotator   # shows the 2-path policy
+```
+
+Now deploy the rotation workspace:
+
+```bash
+cd terraform/vault-rotate-action
+cp terraform.tfvars.example terraform.tfvars
+# Set rotator_token = "$ROTATOR_TOKEN" in terraform.tfvars
+
+terraform init
+terraform plan    # shows: time_rotating + terraform_data resources
+terraform apply -auto-approve
+```
+
+**Expected output:**
+
+```
+⏰  Rotating SecretID for AppRole: payments-app
+    Vault address : http://127.0.0.1:8200
+    Triggered at  : 2025-01-01T12:00:00Z
+
+✅  New SecretID generated  (accessor: abc-123...)
+✅  SecretID written to Vault KV: secrets/payments-app/current-secret-id
+
+Outputs:
+  rotation_schedule     = "Every 24 hours (next rotation when time_rotating fires)"
+  last_rotation_time    = "2025-01-01T12:00:00Z"
+  secret_id_accessor    = "abc-123..."
+  kv_path_for_consumers = "secrets/payments-app/current-secret-id"
+```
+
+### 9.6 Step 5 — Demo on-demand emergency rotation
+
+Show the audience how to trigger rotation without waiting for the timer:
+
+```bash
+# Trigger an immediate rotation by changing the nonce (simulates emergency rotation)
+cd terraform/vault-rotate-action
+terraform apply -auto-approve -var='rotation_nonce=emergency-rotation-1'
+```
+
+**This is the key Day 2 demo moment:**
+- No SSH required
+- No Vault admin token needed by the operator (they use the scoped rotator token)
+- Rotation is auditable in Vault audit logs
+- New SecretID is immediately in KV for the next app deployment to pick up
+
+### 9.7 Verify audit trail in Vault
+
+```bash
+# List SecretID accessors — each rotation leaves an auditable trail
+vault list auth/approle/role/payments-app/secret-id/accessors
+
+# Check the current SecretID stored in KV (metadata only — never the value)
+vault kv metadata get secrets/payments-app/current-secret-id
+```
+
+### 9.8 Cleanup — Scenario 3
+
+```bash
+# terraform -chdir=terraform/vault-rotate-action destroy -auto-approve \
+#   -var="vault_addr=${VAULT_ADDR}" \
+#   -var="rotator_token=${ROTATOR_TOKEN}"
+
+# terraform -chdir=terraform/vault-app-readonly destroy -auto-approve \
+#   -var="vault_addr=${VAULT_ADDR}" \
+#   -var="approle_token=${APP_TOKEN}"
+
+# terraform -chdir=terraform/vault-platform destroy -auto-approve \
+#   -var="vault_addr=${VAULT_ADDR}" \
+#   -var="vault_token=${VAULT_TOKEN}"
+```
+
+---
+
+## Summary: The Three Workspace Trust Model
+
+| Workspace            | Who Runs It         | Vault Token Used          | Can Do                                    |
+|----------------------|---------------------|---------------------------|-------------------------------------------|
+| `vault-platform`     | Platform/Infra team | Root / admin token        | Create policies, AppRoles, write secrets  |
+| `vault-app-readonly` | App team            | Scoped AppRole token      | Read own secret path ONLY                 |
+| `vault-rotate-action`| CI/CD scheduler     | Scoped rotator token      | Generate SecretIDs + write to 1 KV path   |
+
+**No workspace can escalate beyond its scoped token.** This is the core of Vault's
+"no manual intervention" credential renewal story.

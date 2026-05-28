@@ -1,0 +1,7 @@
+# Copy to terraform.tfvars and fill in your values.
+# approle_token is obtained by running:
+#   vault write auth/approle/login role_id=<role_id> secret_id=<secret_id>
+vault_addr    = "http://127.0.0.1:8200"
+approle_token = "REPLACE_WITH_APPROLE_TOKEN"   # never commit this value
+kv_mount      = "secrets"
+secret_path   = "payments-api/db-credentials"
