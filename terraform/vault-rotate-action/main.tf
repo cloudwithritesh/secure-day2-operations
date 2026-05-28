@@ -71,7 +71,7 @@ resource "terraform_data" "rotate_secret_id" {
 
       # Step 2: store the new SecretID in Vault KV for downstream consumption
       # (e.g., another Terraform workspace or a CI/CD pipeline reads it from here)
-      vault kv put ${var.kv_mount}/data/${var.app_role_name}/current-secret-id \
+      vault kv put ${var.kv_mount}/${var.app_role_name}/current-secret-id \
         secret_id="$NEW_SECRET_ID" \
         rotated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         accessor="$ACCESSOR"

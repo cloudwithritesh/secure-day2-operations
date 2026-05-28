@@ -14,6 +14,7 @@ terraform {
 }
 
 provider "vault" {
-  address = var.vault_addr
-  token   = var.rotator_token
+  address          = var.vault_addr
+  token            = var.rotator_token
+  skip_child_token = true
 }

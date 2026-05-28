@@ -67,9 +67,9 @@ resource "vault_policy" "secret_rotator" {
       capabilities = ["create", "update"]
     }
 
-    # Write the new SecretID into KV so downstream automation can pick it up
-    path "secrets/data/${var.app_name}-api/current-secret-id" {
-      capabilities = ["create", "update"]
+    # Write AND read the SecretID back (read needed for rotation workspace outputs)
+    path "secrets/data/${var.app_name}-app/current-secret-id" {
+      capabilities = ["create", "update", "read"]
     }
   EOT
 }

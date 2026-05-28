@@ -6,11 +6,13 @@ output "rotation_schedule" {
 output "last_rotation_time" {
   description = "Timestamp of the last successful rotation (from KV metadata)"
   value       = try(data.vault_kv_secret_v2.current_secret_id_meta.data["rotated_at"], "not yet rotated")
+  sensitive   = true
 }
 
 output "secret_id_accessor" {
-  description = "Accessor of the current SecretID — non-sensitive, can be used to revoke"
+  description = "Accessor of the current SecretID — use to revoke if needed"
   value       = try(data.vault_kv_secret_v2.current_secret_id_meta.data["accessor"], "not yet rotated")
+  sensitive   = true
 }
 
 output "kv_path_for_consumers" {
